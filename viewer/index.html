@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>GLTF Viewer 1.5 Mobile</title>
+<style>
+body{
+  margin:0;
+  overflow:hidden;
+  background:#ffffff;
+  font-family:Arial;
+}
+#drop, #fileInputLabel{
+  position:absolute;
+  top:10px;
+  left:10px;
+  background:#0008;
+  color:#fff;
+  padding:10px;
+  border-radius:6px;
+  cursor:pointer;
+  z-index:10;
+}
+#stats{
+  position:absolute;
+  top:10px;
+  right:10px;
+  background:#0008;
+  color:#fff;
+  padding:10px;
+  font-size:12px;
+  border-radius:6px;
+  z-index:10;
+}
+#fileInput{
+  display:none;
+}
+</style>
+</head>
+<body>
+
+<div id="drop">Chari's Crafts/ HDR</div>
+<label id="fileInputLabel">Chari's Crafts/ HDR</label>
+<input type="file" id="fileInput" accept=".glb,.gltf,.hdr">
+<div id="stats">No Model</div>
+
+<script type="module">
+import * as THREE from "https://esm.sh/three@0.161";
+import {OrbitControls} from "https://esm.sh/three@0.161/examples/jsm/controls/OrbitControls.js";
+import {GLTFLoader} from "https://esm.sh/three@0.161/examples/jsm/loaders/GLTFLoader.js";
+import {RGBELoader} from "https://esm.sh/three@0.161/examples/jsm/loaders/RGBELoader.js";
+import GUI from "https://esm.sh/lil-gui";
+
+/* SCENE */
+let scene = new THREE.Scene();
+scene.background = new THREE.Color("#ffffff");
+
+/* CAMERA */
+let camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+camera.position.set(0,1,3);
+
+/* RENDERER */
+let renderer = new THREE.WebGLRenderer({antialias:true, powerPreference:"high-performance"});
+renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1;
+document.body.appendChild(renderer.domElement);
+
+/* CONTROLS */
+let controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.enablePan = true;
+controls.enableZoom = true;
+controls.enableRotate = true;
+
+/* LIGHTS */
+let hemi = new THREE.HemisphereLight(0xffffff,0x444444,1);
+scene.add(hemi);
+
+let dir = new THREE.DirectionalLight(0xffffff,3);
+dir.position.set(5,8,5);
+dir.castShadow = true;
+dir.shadow.mapSize.set(2048,2048);
+dir.shadow.bias = -0.00005;
+dir.shadow.normalBias = 0.02;
+dir.shadow.radius = 2;
+scene.add(dir);
+
+/* FLOOR */
+let floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(50,50),
+    new THREE.ShadowMaterial({opacity:0.25})
+);
+floor.rotation.x = -Math.PI/2;
+floor.receiveShadow = true;
+scene.add(floor);
+
+/* LOADERS */
+let loader = new GLTFLoader();
+let rgbe = new RGBELoader();
+
+/* MODEL DATA */
+let model;
+let loadedGLTF = null; // keep reference to gltf for variants
+let materials = [];
+let variants = [];
+let variantFolder;
+
+/* AUTO FRAME */
+function frameModel(object){
+    let box = new THREE.Box3().setFromObject(object);
+    let size = box.getSize(new THREE.Vector3()).length();
+    let center = box.getCenter(new THREE.Vector3());
+
+    controls.target.copy(center);
+
+    camera.near = size / 100;
+    camera.far = size * 100;
+    camera.updateProjectionMatrix();
+
+    camera.position.copy(center);
+    camera.position.x += size/2;
+    camera.position.y += size/5;
+    camera.position.z += size/2;
+
+    controls.update();
+}
+
+/* MATERIAL COLLECTION */
+function collectMaterials(root){
+    materials = [];
+    root.traverse(o=>{
+        if(o.isMesh){
+            o.castShadow = true;
+            o.receiveShadow = true;
+            if(Array.isArray(o.material)) materials.push(...o.material);
+            else materials.push(o.material);
+
+            // store original material for resets
+            o.userData.originalMaterial = Array.isArray(o.material)? [...o.material] : o.material;
+        }
+    });
+}
+
+/* MODEL STATS */
+function updateStats(root){
+    let meshes=0, verts=0, tris=0;
+    root.traverse(o=>{
+        if(o.isMesh){
+            meshes++;
+            let g = o.geometry;
+            verts += g.attributes.position.count;
+            tris += g.index ? g.index.count/3 : g.attributes.position.count/3;
+        }
+    });
+    document.getElementById("stats").innerHTML=
+        "Meshes: "+meshes+
+        "<br>Vertices: "+verts+
+        "<br>Triangles: "+tris;
+}
+
+/* COLLECT VARIANTS */
+function collectVariants(gltf){
+    variants = gltf.parser.json.extensions?.KHR_materials_variants?.variants || [];
+
+    model.traverse(mesh=>{
+        if(!mesh.isMesh) return;
+        mesh.userData.variantMappings = [];
+
+        const meshDef = gltf.parser.json.meshes.find(m=>m.name===mesh.name);
+        if(!meshDef) return;
+
+        meshDef.primitives?.forEach((prim)=>{
+            const ext = prim.extensions?.KHR_materials_variants;
+            if(!ext) return;
+            ext.mappings.forEach(map=>{
+                mesh.userData.variantMappings.push({
+                    materialIndex: map.material,
+                    variants: map.variants
+                });
+            });
+        });
+    });
+
+    if(variants.length>0){
+        buildVariantGUI();
+        applyVariant(variants[0].name); // auto-apply first
+    }
+}
+
+/* APPLY VARIANT */
+async function applyVariant(name){
+    if(!loadedGLTF) return;
+
+    const variantIndex = variants.findIndex(v=>v.name===name);
+    if(variantIndex===-1) return;
+
+    const promises = [];
+
+    model.traverse(mesh=>{
+        if(!mesh.isMesh || !mesh.userData.variantMappings) return;
+
+        // reset original
+        mesh.material = Array.isArray(mesh.userData.originalMaterial)?
+            [...mesh.userData.originalMaterial] : mesh.userData.originalMaterial;
+
+        mesh.userData.variantMappings.forEach(map=>{
+            if(map.variants.includes(variantIndex)){
+                promises.push(
+                    loadedGLTF.parser.getDependency("material", map.materialIndex)
+                    .then(mat=>{
+                        if(Array.isArray(mesh.material)){
+                            mesh.material[0] = mat;
+                        } else {
+                            mesh.material = mat;
+                        }
+                        mesh.material.needsUpdate = true;
+                    })
+                );
+            }
+        });
+    });
+
+    await Promise.all(promises);
+}
+
+/* BUILD VARIANT GUI */
+let gui = new GUI();
+function buildVariantGUI(){
+    if(variantFolder) gui.removeFolder(variantFolder);
+    variantFolder = gui.addFolder("Variants");
+    let variantNames = variants.map(v=>v.name);
+    let settings = {variant: variantNames[0]};
+    variantFolder.add(settings,"variant",variantNames)
+        .onChange(v=>applyVariant(v));
+}
+
+/* LOAD MODEL */
+function loadModel(file){
+    let url = URL.createObjectURL(file);
+    loader.load(url,gltf=>{
+        if(model) scene.remove(model);
+        model = gltf.scene;
+        scene.add(model);
+
+        loadedGLTF = gltf;
+
+        model.traverse(o=>{
+            if(o.isMesh && o.material.map) o.material.map.anisotropy = 16;
+        });
+
+        collectMaterials(model);
+        updateStats(model);
+        frameModel(model);
+        collectVariants(gltf);
+    });
+}
+
+/* LOAD HDR */
+function loadHDR(file){
+    let url = URL.createObjectURL(file);
+    rgbe.load(url,tex=>{
+        tex.mapping = THREE.EquirectangularReflectionMapping;
+        scene.environment = tex;
+        scene.background = tex;
+    });
+}
+
+/* DRAG & DROP */
+document.addEventListener("dragover", e=> e.preventDefault());
+document.addEventListener("drop", e=>{
+    e.preventDefault();
+    let file = e.dataTransfer.files[0];
+    if(!file) return;
+    if(file.name.endsWith(".glb") || file.name.endsWith(".gltf")) loadModel(file);
+    if(file.name.endsWith(".hdr")) loadHDR(file);
+});
+
+/* MOBILE FILE SELECT BUTTON */
+const fileInput = document.getElementById("fileInput");
+const fileInputLabel = document.getElementById("fileInputLabel");
+fileInputLabel.addEventListener("click", ()=> fileInput.click());
+fileInput.addEventListener("change", e=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    if(file.name.endsWith(".glb") || file.name.endsWith(".gltf")) loadModel(file);
+    if(file.name.endsWith(".hdr")) loadHDR(file);
+});
+
+/* RENDER SETTINGS */
+let renderSettings = {exposure:1};
+let renderFolder = gui.addFolder("Render");
+renderFolder.add(renderSettings,"exposure",0,3).onChange(v=>renderer.toneMappingExposure=v);
+
+/* SHADOW SETTINGS */
+let shadowSettings = {bias:-0.0005, normalBias:0.02, radius:2, resolution:2048};
+let shadowFolder = gui.addFolder("Shadows");
+shadowFolder.add(shadowSettings,"bias",-0.01,0.01,0.0001).onChange(v=>dir.shadow.bias=v);
+shadowFolder.add(shadowSettings,"normalBias",0,0.2,0.001).onChange(v=>dir.shadow.normalBias=v);
+shadowFolder.add(shadowSettings,"radius",0,10,0.1).onChange(v=>dir.shadow.radius=v);
+shadowFolder.add(shadowSettings,"resolution",[512,1024,2048,4096]).onChange(v=>{
+    dir.shadow.mapSize.set(v,v);
+    if(dir.shadow.map) dir.shadow.map.dispose();
+    dir.shadow.map=null;
+});
+
+/* MODEL SETTINGS */
+let modelSettings = {scale:1, wireframe:false, rotate:false};
+let modelFolder = gui.addFolder("Model");
+modelFolder.add(modelSettings,"scale",0.1,5).onChange(v=>{if(model) model.scale.setScalar(v);});
+modelFolder.add(modelSettings,"wireframe").onChange(v=>{materials.forEach(m=>{m.wireframe=v;});});
+modelFolder.add(modelSettings,"rotate");
+
+/* ANIMATION LOOP */
+function animate(){
+    renderer.setAnimationLoop(()=>{
+        controls.update();
+        if(model && modelSettings.rotate) model.rotation.y += 0.005;
+        renderer.render(scene,camera);
+    });
+}
+animate();
+
+/* RESIZE */
+window.addEventListener("resize", ()=>{
+    camera.aspect = window.innerWidth/window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
