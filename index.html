@@ -251,7 +251,7 @@ let shadowFolder=gui.addFolder("Shadows");
 shadowFolder.add(shadowSettings,"bias",-0.01,0.01,0.0001).onChange(v=>dir.shadow.bias=v);
 shadowFolder.add(shadowSettings,"normalBias",0,0.2,0.001).onChange(v=>dir.shadow.normalBias=v);
 shadowFolder.add(shadowSettings,"radius",0,10,0.1).onChange(v=>dir.shadow.radius=v);
-shadowFolder.add(shadowSettings,"resolution",[512,1024,2048,4096]).onChange(v=>{
+shadowFolder.add(shadowSettings,"resolution",[512]).onChange(v=>{
     dir.shadow.mapSize.set(v,v);
     if(dir.shadow.map) dir.shadow.map.dispose();
     dir.shadow.map=null;
