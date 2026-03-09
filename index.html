@@ -246,7 +246,7 @@ let renderFolder=gui.addFolder("Render");
 renderFolder.add(renderSettings,"exposure",0,3).onChange(v=>renderer.toneMappingExposure=v);
 
 /* SHADOW SETTINGS */
-let shadowSettings={bias:-0.0005, normalBias:0.02, radius:2, resolution:2048};
+let shadowSettings={bias:-0.00001, normalBias:0.02, radius:2, resolution:512};
 let shadowFolder=gui.addFolder("Shadows");
 shadowFolder.add(shadowSettings,"bias",-0.01,0.01,0.0001).onChange(v=>dir.shadow.bias=v);
 shadowFolder.add(shadowSettings,"normalBias",0,0.2,0.001).onChange(v=>dir.shadow.normalBias=v);
